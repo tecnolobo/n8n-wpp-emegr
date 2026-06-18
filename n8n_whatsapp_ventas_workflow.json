@@ -1,0 +1,383 @@
+{
+  "name": "Ventas IA - WhatsApp + Google Sheets",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "whatsapp",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "node-webhook-verify",
+      "name": "Webhook Verificacion",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [-1120, 80],
+      "webhookId": "whatsapp-verify"
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.query['hub.challenge'] }}",
+        "options": {}
+      },
+      "id": "node-respond-challenge",
+      "name": "Responder Challenge",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [-880, 80]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "whatsapp",
+        "responseMode": "onReceived",
+        "responseData": "OK",
+        "options": {}
+      },
+      "id": "node-webhook-messages",
+      "name": "Webhook Mensajes",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [-1120, 360],
+      "webhookId": "whatsapp-messages"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parseo del payload entrante de WhatsApp Cloud API\nconst body = $input.first().json.body || $input.first().json;\nconst value = body?.entry?.[0]?.changes?.[0]?.value;\nconst message = value?.messages?.[0];\n\n// Si no es un mensaje de texto (es status, imagen, etc.) detenemos el flujo\nif (!message || message.type !== 'text') {\n  return [];\n}\n\nconst telefono = message.from;\nconst texto = message.text.body;\nconst nombrePerfil = value?.contacts?.[0]?.profile?.name || '';\nconst phoneNumberId = value?.metadata?.phone_number_id || '';\n\nreturn [{\n  json: { telefono, texto, nombrePerfil, phoneNumberId }\n}];"
+      },
+      "id": "node-extract",
+      "name": "Extraer Mensaje",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-880, 360]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_SPREADSHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "sesiones",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "node-read-sesiones",
+      "name": "Leer Sesiones",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [-640, 360],
+      "alwaysOutputData": true,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "YOUR_GOOGLE_SHEETS_CRED_ID",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_SPREADSHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "inventario",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "node-read-inventario",
+      "name": "Leer Inventario",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [-400, 360],
+      "alwaysOutputData": true,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "YOUR_GOOGLE_SHEETS_CRED_ID",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Construye el contexto para el AI Agent: catalogo + estado de sesion + mensaje\nconst msg = $('Extraer Mensaje').first().json;\nconst telefono = String(msg.telefono);\n\n// Catalogo\nconst inv = $('Leer Inventario').all().map(i => i.json).filter(r => r.producto);\nconst catalogo = inv.map(r => `- ${r.producto} | $${r.valor} | ${r.descripcion || ''}`).join('\\n');\n\n// Sesion actual del cliente\nconst sesiones = $('Leer Sesiones').all().map(i => i.json);\nconst sesion = sesiones.find(s => String(s.telefono) === telefono) || {};\n\nconst estado = {\n  etapa: sesion.etapa || 'inicio',\n  producto_seleccionado: sesion.producto_seleccionado || '',\n  valor: sesion.valor || '',\n  nombre: sesion.nombre || '',\n  direccion: sesion.direccion || ''\n};\n\nconst prompt = `CATALOGO DISPONIBLE:\\n${catalogo || '(catalogo vacio)'}\\n\\nESTADO ACTUAL DE LA CONVERSACION:\\n${JSON.stringify(estado)}\\n\\nMENSAJE NUEVO DEL CLIENTE:\\n\"${msg.texto}\"`;\n\nreturn [{\n  json: {\n    telefono,\n    phoneNumberId: msg.phoneNumberId,\n    prompt,\n    ...estado\n  }\n}];"
+      },
+      "id": "node-build-context",
+      "name": "Construir Contexto",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-160, 360]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.prompt }}",
+        "hasOutputParser": true,
+        "options": {
+          "systemMessage": "Eres un asistente de ventas por WhatsApp, cercano y natural. Recibes el CATALOGO disponible, el ESTADO ACTUAL de la conversacion y el MENSAJE NUEVO del cliente. Tu trabajo es hacer avanzar la venta paso a paso y devolver SIEMPRE un JSON con los campos: etapa, producto_seleccionado, valor, nombre, direccion, respuesta, guardar_pedido, limpiar_sesion.\n\nETAPAS (en orden): inicio -> confirmar_producto -> pedir_nombre -> pedir_direccion -> confirmar_pedido -> cerrado.\n\nREGLAS POR ETAPA:\n- inicio: Detecta intencion de compra y matchea el mensaje contra el CATALOGO. Si hay coincidencia, responde confirmando producto y precio y pregunta si desea pedirlo; pon etapa=confirmar_producto, producto_seleccionado=nombre exacto del catalogo, valor=precio numerico. Si NO hay coincidencia, pide que aclare o sugiere productos del catalogo; etapa sigue en inicio. guardar_pedido=false.\n- confirmar_producto: Si el cliente confirma (si, dale, quiero, lo pido), pide su NOMBRE y pon etapa=pedir_nombre. Si menciona otro producto, vuelve a matchear y quedate en confirmar_producto. Si dice que no, despidete amablemente, etapa=inicio, limpiar_sesion=true.\n- pedir_nombre: Guarda el nombre en el campo nombre, agradece y pide la DIRECCION de entrega; etapa=pedir_direccion.\n- pedir_direccion: Guarda la direccion en el campo direccion. Muestra un RESUMEN del pedido (producto en *negrita*, precio, nombre, direccion) y pide CONFIRMACION final (responder SI para registrar); etapa=confirmar_pedido.\n- confirmar_pedido: Si confirma, responde un mensaje de cierre tipo '¡Pedido registrado! Te contactamos pronto.'; pon guardar_pedido=true, etapa=cerrado, limpiar_sesion=true. Si no confirma o quiere cambiar algo, ajusta y mantente en la etapa adecuada; guardar_pedido=false.\n\nREGLAS GENERALES:\n- Si en cualquier momento el cliente quiere CANCELAR o EMPEZAR DE NUEVO: responde confirmando la cancelacion, pon etapa=inicio, limpiar_sesion=true y vacia producto_seleccionado, valor, nombre y direccion.\n- ACUMULA los datos ya recolectados: nunca borres nombre/direccion/producto si ya estaban llenos (salvo cancelacion).\n- Usa formato WhatsApp: *negrita* para el producto y el precio. Respuestas cortas, tono de chat.\n- valor SIEMPRE debe ser numerico (sin simbolos). Si no aplica, usa 0.\n- guardar_pedido SOLO es true en el momento exacto de registrar el pedido (al confirmar en confirmar_pedido).\n- Devuelve unicamente el JSON estructurado solicitado, sin texto adicional fuera del JSON."
+        }
+      },
+      "id": "node-ai-agent",
+      "name": "AI Agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.7,
+      "position": [120, 360]
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "gpt-4o-mini",
+          "mode": "list",
+          "cachedResultName": "gpt-4o-mini"
+        },
+        "options": {
+          "temperature": 0.3
+        }
+      },
+      "id": "node-openai-model",
+      "name": "OpenAI Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.2,
+      "position": [40, 580],
+      "credentials": {
+        "openAiApi": {
+          "id": "YOUR_OPENAI_CRED_ID",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "schemaType": "fromJson",
+        "jsonSchemaExample": "{\n  \"etapa\": \"confirmar_producto\",\n  \"producto_seleccionado\": \"Camisa Blanca\",\n  \"valor\": 25000,\n  \"nombre\": \"\",\n  \"direccion\": \"\",\n  \"respuesta\": \"Si, tenemos *Camisa Blanca* por *$25.000*. ¿Deseas pedirla?\",\n  \"guardar_pedido\": false,\n  \"limpiar_sesion\": false\n}"
+      },
+      "id": "node-output-parser",
+      "name": "Parser de Salida",
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.2,
+      "position": [260, 580]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Aplana la salida del AI Agent y agrega metadatos del cliente\nconst ai = $json.output || $json;\nconst ctx = $('Construir Contexto').first().json;\n\nconst respuesta = ai.respuesta || 'Disculpa, no entendi. ¿Puedes repetirlo?';\nconst telefono = ctx.telefono;\n\nreturn [{\n  json: {\n    telefono,\n    phoneNumberId: ctx.phoneNumberId,\n    etapa: ai.etapa || 'inicio',\n    producto_seleccionado: ai.producto_seleccionado || '',\n    valor: (ai.valor === undefined || ai.valor === null) ? '' : ai.valor,\n    nombre: ai.nombre || '',\n    direccion: ai.direccion || '',\n    respuesta,\n    guardar_pedido: ai.guardar_pedido === true,\n    limpiar_sesion: ai.limpiar_sesion === true,\n    fecha: new Date().toISOString(),\n    wa_payload: {\n      messaging_product: 'whatsapp',\n      to: telefono,\n      type: 'text',\n      text: { body: respuesta }\n    }\n  }\n}];"
+      },
+      "id": "node-process-ai",
+      "name": "Procesar Respuesta IA",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [480, 360]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_SPREADSHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "sesiones",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "matchingColumns": ["telefono"],
+          "value": {
+            "telefono": "={{ $('Procesar Respuesta IA').first().json.telefono }}",
+            "etapa": "={{ $('Procesar Respuesta IA').first().json.etapa }}",
+            "producto_seleccionado": "={{ $('Procesar Respuesta IA').first().json.producto_seleccionado }}",
+            "valor": "={{ $('Procesar Respuesta IA').first().json.valor }}",
+            "nombre": "={{ $('Procesar Respuesta IA').first().json.nombre }}",
+            "direccion": "={{ $('Procesar Respuesta IA').first().json.direccion }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "node-save-sesion",
+      "name": "Guardar Sesion",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [720, 360],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "YOUR_GOOGLE_SHEETS_CRED_ID",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "cond-guardar",
+              "leftValue": "={{ $('Procesar Respuesta IA').first().json.guardar_pedido }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "node-if-guardar",
+      "name": "¿Guardar Pedido?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [960, 360]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_SPREADSHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "pedidos",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "fecha": "={{ $('Procesar Respuesta IA').first().json.fecha }}",
+            "producto": "={{ $('Procesar Respuesta IA').first().json.producto_seleccionado }}",
+            "valor": "={{ $('Procesar Respuesta IA').first().json.valor }}",
+            "nombre": "={{ $('Procesar Respuesta IA').first().json.nombre }}",
+            "telefono": "={{ $('Procesar Respuesta IA').first().json.telefono }}",
+            "direccion": "={{ $('Procesar Respuesta IA').first().json.direccion }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "node-append-pedido",
+      "name": "Registrar Pedido",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [1200, 220],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "YOUR_GOOGLE_SHEETS_CRED_ID",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v21.0/{{ $('Procesar Respuesta IA').first().json.phoneNumberId }}/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($('Procesar Respuesta IA').first().json.wa_payload) }}",
+        "options": {}
+      },
+      "id": "node-send-whatsapp",
+      "name": "Enviar WhatsApp",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1440, 360],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "YOUR_WHATSAPP_HEADER_CRED_ID",
+          "name": "WhatsApp Token (Header Auth)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## Flujo de Ventas IA por WhatsApp\n\n1. **Webhook Verificacion (GET)**: responde el `hub.challenge` de Meta.\n2. **Webhook Mensajes (POST)**: recibe los mensajes entrantes.\n3. Se lee la **sesion** y el **inventario** desde Google Sheets.\n4. El **AI Agent (GPT-4o-mini)** decide la etapa y redacta la respuesta (JSON estructurado).\n5. Se guarda la sesion, se registra el pedido (si aplica) y se responde por WhatsApp.\n\n**Antes de usar:** reemplaza `YOUR_SPREADSHEET_ID` y selecciona tus credenciales en cada nodo.",
+        "height": 260,
+        "width": 420
+      },
+      "id": "node-sticky",
+      "name": "Notas",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-1120, -260]
+    }
+  ],
+  "connections": {
+    "Webhook Verificacion": {
+      "main": [[{ "node": "Responder Challenge", "type": "main", "index": 0 }]]
+    },
+    "Webhook Mensajes": {
+      "main": [[{ "node": "Extraer Mensaje", "type": "main", "index": 0 }]]
+    },
+    "Extraer Mensaje": {
+      "main": [[{ "node": "Leer Sesiones", "type": "main", "index": 0 }]]
+    },
+    "Leer Sesiones": {
+      "main": [[{ "node": "Leer Inventario", "type": "main", "index": 0 }]]
+    },
+    "Leer Inventario": {
+      "main": [[{ "node": "Construir Contexto", "type": "main", "index": 0 }]]
+    },
+    "Construir Contexto": {
+      "main": [[{ "node": "AI Agent", "type": "main", "index": 0 }]]
+    },
+    "OpenAI Chat Model": {
+      "ai_languageModel": [[{ "node": "AI Agent", "type": "ai_languageModel", "index": 0 }]]
+    },
+    "Parser de Salida": {
+      "ai_outputParser": [[{ "node": "AI Agent", "type": "ai_outputParser", "index": 0 }]]
+    },
+    "AI Agent": {
+      "main": [[{ "node": "Procesar Respuesta IA", "type": "main", "index": 0 }]]
+    },
+    "Procesar Respuesta IA": {
+      "main": [[{ "node": "Guardar Sesion", "type": "main", "index": 0 }]]
+    },
+    "Guardar Sesion": {
+      "main": [[{ "node": "¿Guardar Pedido?", "type": "main", "index": 0 }]]
+    },
+    "¿Guardar Pedido?": {
+      "main": [
+        [{ "node": "Registrar Pedido", "type": "main", "index": 0 }],
+        [{ "node": "Enviar WhatsApp", "type": "main", "index": 0 }]
+      ]
+    },
+    "Registrar Pedido": {
+      "main": [[{ "node": "Enviar WhatsApp", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}
