@@ -16,8 +16,18 @@ CREATE TABLE IF NOT EXISTS sesiones (
     actualizado_en        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Indice para consultar/limpiar sesiones viejas por fecha (opcional)
 CREATE INDEX IF NOT EXISTS idx_sesiones_actualizado ON sesiones (actualizado_en);
+
+-- Tabla de INVENTARIO (cache del catalogo en Postgres)
+-- El workflow "Sync Inventario" la mantiene sincronizada desde Google Sheets
+-- SOLO cuando el inventario cambia (o en la primera carga manual).
+-- El flujo principal lee el catalogo desde aqui (rapido), no desde Sheets en cada mensaje.
+CREATE TABLE IF NOT EXISTS inventario (
+    id          TEXT PRIMARY KEY,
+    producto    TEXT    NOT NULL,
+    valor       NUMERIC DEFAULT 0,
+    descripcion TEXT    DEFAULT ''
+);
 
 -- ============================================================
 --  Nota: la tabla de MEMORIA de conversacion (n8n_chat_histories)

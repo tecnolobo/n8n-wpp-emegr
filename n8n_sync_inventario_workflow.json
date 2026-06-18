@@ -1,0 +1,149 @@
+{
+  "name": "Sync Inventario (Google Sheets -> PostgreSQL)",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_SPREADSHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "inventario",
+          "mode": "name"
+        },
+        "event": "anyUpdate",
+        "options": {}
+      },
+      "id": "node-trigger-change",
+      "name": "Trigger - Cambio Inventario",
+      "type": "n8n-nodes-base.googleSheetsTrigger",
+      "typeVersion": 1,
+      "position": [-680, 220],
+      "credentials": {
+        "googleSheetsTriggerOAuth2Api": {
+          "id": "YOUR_GOOGLE_SHEETS_CRED_ID",
+          "name": "Google Sheets Trigger account"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "node-trigger-manual",
+      "name": "Primera Carga (Manual)",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [-680, 420]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_SPREADSHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "inventario",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "node-read-inv-sheets",
+      "name": "Leer Inventario (Sheets)",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [-420, 320],
+      "alwaysOutputData": true,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "YOUR_GOOGLE_SHEETS_CRED_ID",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO inventario (id, producto, valor, descripcion)\nVALUES ($1, $2, $3, $4)\nON CONFLICT (id) DO UPDATE SET\n  producto = EXCLUDED.producto,\n  valor = EXCLUDED.valor,\n  descripcion = EXCLUDED.descripcion;",
+        "options": {
+          "queryReplacement": "={{ [$json.id, $json.producto, Number($json.valor) || 0, $json.descripcion || ''] }}"
+        }
+      },
+      "id": "node-upsert-inv",
+      "name": "Upsert Inventario",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [-180, 320],
+      "credentials": {
+        "postgres": {
+          "id": "YOUR_POSTGRES_CRED_ID",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "DELETE FROM inventario WHERE NOT (id = ANY($1::text[]));",
+        "options": {
+          "queryReplacement": "={{ [ $('Leer Inventario (Sheets)').all().map(i => String(i.json.id)) ] }}"
+        }
+      },
+      "id": "node-delete-stale",
+      "name": "Eliminar Borrados",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [60, 320],
+      "executeOnce": true,
+      "credentials": {
+        "postgres": {
+          "id": "YOUR_POSTGRES_CRED_ID",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## Sincronizacion de Inventario\n\nEste workflow copia el catalogo de **Google Sheets -> PostgreSQL** SOLO cuando el inventario cambia (Trigger de Google Sheets, evento `anyUpdate`) o al ejecutarlo manualmente la primera vez.\n\nAsi el flujo principal lee el catalogo desde Postgres (rapido) y NO consulta Sheets en cada mensaje.\n\n- **Upsert**: agrega/actualiza productos por `id`.\n- **Eliminar Borrados**: quita de Postgres los productos que ya no estan en la hoja.\n\n**Recuerda** reemplazar `YOUR_SPREADSHEET_ID` y las credenciales.",
+        "height": 280,
+        "width": 420
+      },
+      "id": "node-sticky-sync",
+      "name": "Notas",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-680, -120]
+    }
+  ],
+  "connections": {
+    "Trigger - Cambio Inventario": {
+      "main": [[{ "node": "Leer Inventario (Sheets)", "type": "main", "index": 0 }]]
+    },
+    "Primera Carga (Manual)": {
+      "main": [[{ "node": "Leer Inventario (Sheets)", "type": "main", "index": 0 }]]
+    },
+    "Leer Inventario (Sheets)": {
+      "main": [[{ "node": "Upsert Inventario", "type": "main", "index": 0 }]]
+    },
+    "Upsert Inventario": {
+      "main": [[{ "node": "Eliminar Borrados", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}
