@@ -6,6 +6,7 @@ Agente conversacional por WhatsApp que detecta intención de compra con **GPT-4o
 > 1. **Identificador único por producto** (columna `id`) que se propaga a `sesiones` y `pedidos`.
 > 2. **Registro de cancelaciones**: si el cliente cancela un pedido en curso, se guarda en `pedidos` con `estado = cancelado` (los completados quedan `registrado`).
 > 3. **Memoria de conversación en PostgreSQL** (nodo *Postgres Chat Memory*, clave = teléfono): la IA recuerda los mensajes previos de cada cliente.
+> 4. **`sesiones` migradas a PostgreSQL** (UPSERT atómico por `telefono`): soporta muchos clientes en paralelo **sin condiciones de carrera**. `inventario` y `pedidos` siguen en Google Sheets.
 
 ---
 
@@ -16,7 +17,7 @@ Agente conversacional por WhatsApp que detecta intención de compra con **GPT-4o
 | `n8n_whatsapp_ventas_workflow.json` | Workflow listo para **importar** en n8n |
 | `google_sheets/inventario.csv` | Plantilla del catálogo con datos de ejemplo |
 | `google_sheets/pedidos.csv` | Plantilla de pedidos (solo encabezados) |
-| `google_sheets/sesiones.csv` | Plantilla de estado de conversación (solo encabezados) |
+| `sql/setup_postgres.sql` | Script SQL para crear la tabla `sesiones` en PostgreSQL |
 
 ---
 
@@ -71,31 +72,38 @@ El cliente puede **cancelar** o **empezar de nuevo** en cualquier momento (la IA
 
 ## 🚀 Instalación paso a paso
 
-### 1. Crear los Google Sheets
-1. Crea **un** Google Spreadsheet (puede tener las 3 hojas dentro).
-2. Crea 3 hojas (pestañas) con estos **nombres exactos** y encabezados en la **fila 1**:
+### 1. Crear las tablas en PostgreSQL
+1. Levanta PostgreSQL (ver comando Docker más abajo) y ejecuta el script `sql/setup_postgres.sql`. Crea la tabla **`sesiones`** (clave primaria `telefono`).
+2. La tabla de memoria **`n8n_chat_histories`** se crea sola en la primera ejecución del nodo *Postgres Chat Memory*.
+
+### 2. Crear los Google Sheets (solo `inventario` y `pedidos`)
+1. Crea **un** Google Spreadsheet con **2 hojas** (pestañas).
+2. Crea las hojas con estos **nombres exactos** y encabezados en la **fila 1**:
 
 **`inventario`**
-| producto | valor | descripcion |
+| id | producto | valor | descripcion |
 
 **`pedidos`**
-| fecha | producto | valor | nombre | telefono | direccion |
+| fecha | id_producto | producto | valor | nombre | telefono | direccion | estado |
 
-**`sesiones`**
-| telefono | etapa | producto_seleccionado | valor | nombre | direccion |
+> ℹ️ Ya **no** existe la hoja `sesiones` en Google Sheets: el estado de conversación vive ahora en la tabla `sesiones` de **PostgreSQL**.
 
 3. Puedes importar los CSV de la carpeta `google_sheets/` (Archivo → Importar) para tener la estructura y datos de ejemplo del catálogo.
 4. Copia el **Spreadsheet ID** de la URL: `https://docs.google.com/spreadsheets/d/`**`ESTE_ES_EL_ID`**`/edit`.
 
-### 2. Importar el workflow en n8n
+### 3. Importar el workflow en n8n
 1. En n8n: **Workflows → Import from File** → selecciona `n8n_whatsapp_ventas_workflow.json`.
 2. El workflow aparecerá con todos los nodos conectados.
 
-### 3. Configurar credenciales
-En cada nodo de Google Sheets (**Leer Sesiones, Leer Inventario, Guardar Sesión, Registrar Pedido**):
+### 4. Configurar credenciales
+En los nodos de **Google Sheets** (**Leer Inventario, Registrar Pedido**):
 - Selecciona tu credencial **Google Sheets OAuth2**.
-- En `Document` → pega tu **Spreadsheet ID** (o selecciona por lista). Reemplaza el placeholder `YOUR_SPREADSHEET_ID` en los 4 nodos.
-- Verifica que `Sheet` apunte a `sesiones`, `inventario`, `sesiones` y `pedidos` respectivamente.
+- En `Document` → pega tu **Spreadsheet ID**. Reemplaza el placeholder `YOUR_SPREADSHEET_ID` en ambos nodos.
+- Verifica que `Sheet` apunte a `inventario` y `pedidos` respectivamente.
+
+En los nodos de **PostgreSQL** (**Leer Sesiones, Guardar Sesion**):
+- Selecciona tu credencial **Postgres** (la misma del nodo de memoria).
+- Ya traen las consultas SQL listas (SELECT por `telefono` y UPSERT `ON CONFLICT`). No necesitas tocar nada.
 
 En el nodo **OpenAI Chat Model**:
 - Selecciona tu credencial **OpenAI** (tu API key). Modelo: `gpt-4o-mini`.

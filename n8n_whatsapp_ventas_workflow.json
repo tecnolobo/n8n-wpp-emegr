@@ -1,5 +1,5 @@
 {
-  "name": "Ventas IA - WhatsApp + Google Sheets + Postgres Memory",
+  "name": "Ventas IA - WhatsApp + Sheets + Postgres (Sesiones + Memoria)",
   "nodes": [
     {
       "parameters": {
@@ -54,28 +54,22 @@
     },
     {
       "parameters": {
-        "documentId": {
-          "__rl": true,
-          "value": "YOUR_SPREADSHEET_ID",
-          "mode": "id"
-        },
-        "sheetName": {
-          "__rl": true,
-          "value": "sesiones",
-          "mode": "name"
-        },
-        "options": {}
+        "operation": "executeQuery",
+        "query": "SELECT etapa, producto_id, producto_seleccionado, valor, nombre, direccion\nFROM sesiones\nWHERE telefono = $1;",
+        "options": {
+          "queryReplacement": "={{ [$json.telefono] }}"
+        }
       },
       "id": "node-read-sesiones",
       "name": "Leer Sesiones",
-      "type": "n8n-nodes-base.googleSheets",
-      "typeVersion": 4.5,
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
       "position": [-640, 360],
       "alwaysOutputData": true,
       "credentials": {
-        "googleSheetsOAuth2Api": {
-          "id": "YOUR_GOOGLE_SHEETS_CRED_ID",
-          "name": "Google Sheets account"
+        "postgres": {
+          "id": "YOUR_POSTGRES_CRED_ID",
+          "name": "Postgres account"
         }
       }
     },
@@ -108,7 +102,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Construye el contexto para el AI Agent: catalogo + estado de sesion + mensaje\nconst msg = $('Extraer Mensaje').first().json;\nconst telefono = String(msg.telefono);\n\n// Catalogo (incluye el identificador unico de cada producto)\nconst inv = $('Leer Inventario').all().map(i => i.json).filter(r => r.producto);\nconst catalogo = inv.map(r => `- [${r.id}] ${r.producto} | $${r.valor} | ${r.descripcion || ''}`).join('\\n');\n\n// Sesion actual del cliente\nconst sesiones = $('Leer Sesiones').all().map(i => i.json);\nconst sesion = sesiones.find(s => String(s.telefono) === telefono) || {};\n\nconst estado = {\n  etapa: sesion.etapa || 'inicio',\n  producto_id: sesion.producto_id || '',\n  producto_seleccionado: sesion.producto_seleccionado || '',\n  valor: sesion.valor || '',\n  nombre: sesion.nombre || '',\n  direccion: sesion.direccion || ''\n};\n\nconst prompt = `CATALOGO DISPONIBLE (formato: [id] producto | precio | descripcion):\\n${catalogo || '(catalogo vacio)'}\\n\\nESTADO ACTUAL DE LA CONVERSACION:\\n${JSON.stringify(estado)}\\n\\nMENSAJE NUEVO DEL CLIENTE:\\n\"${msg.texto}\"`;\n\nreturn [{\n  json: {\n    telefono,\n    phoneNumberId: msg.phoneNumberId,\n    prompt,\n    ...estado\n  }\n}];"
+        "jsCode": "// Construye el contexto para el AI Agent: catalogo + estado de sesion + mensaje\nconst msg = $('Extraer Mensaje').first().json;\nconst telefono = String(msg.telefono);\n\n// Catalogo (incluye el identificador unico de cada producto)\nconst inv = $('Leer Inventario').all().map(i => i.json).filter(r => r.producto);\nconst catalogo = inv.map(r => `- [${r.id}] ${r.producto} | $${r.valor} | ${r.descripcion || ''}`).join('\\n');\n\n// Sesion actual del cliente (desde PostgreSQL, ya filtrada por telefono)\nconst sesionRows = $('Leer Sesiones').all().map(i => i.json);\nconst sesion = sesionRows[0] || {};\n\nconst estado = {\n  etapa: sesion.etapa || 'inicio',\n  producto_id: sesion.producto_id || '',\n  producto_seleccionado: sesion.producto_seleccionado || '',\n  valor: sesion.valor || '',\n  nombre: sesion.nombre || '',\n  direccion: sesion.direccion || ''\n};\n\nconst prompt = `CATALOGO DISPONIBLE (formato: [id] producto | precio | descripcion):\\n${catalogo || '(catalogo vacio)'}\\n\\nESTADO ACTUAL DE LA CONVERSACION:\\n${JSON.stringify(estado)}\\n\\nMENSAJE NUEVO DEL CLIENTE:\\n\"${msg.texto}\"`;\n\nreturn [{\n  json: {\n    telefono,\n    phoneNumberId: msg.phoneNumberId,\n    prompt,\n    ...estado\n  }\n}];"
       },
       "id": "node-build-context",
       "name": "Construir Contexto",
@@ -197,41 +191,21 @@
     },
     {
       "parameters": {
-        "operation": "appendOrUpdate",
-        "documentId": {
-          "__rl": true,
-          "value": "YOUR_SPREADSHEET_ID",
-          "mode": "id"
-        },
-        "sheetName": {
-          "__rl": true,
-          "value": "sesiones",
-          "mode": "name"
-        },
-        "columns": {
-          "mappingMode": "defineBelow",
-          "matchingColumns": ["telefono"],
-          "value": {
-            "telefono": "={{ $('Procesar Respuesta IA').first().json.telefono }}",
-            "etapa": "={{ $('Procesar Respuesta IA').first().json.etapa }}",
-            "producto_id": "={{ $('Procesar Respuesta IA').first().json.producto_id }}",
-            "producto_seleccionado": "={{ $('Procesar Respuesta IA').first().json.producto_seleccionado }}",
-            "valor": "={{ $('Procesar Respuesta IA').first().json.valor }}",
-            "nombre": "={{ $('Procesar Respuesta IA').first().json.nombre }}",
-            "direccion": "={{ $('Procesar Respuesta IA').first().json.direccion }}"
-          }
-        },
-        "options": {}
+        "operation": "executeQuery",
+        "query": "INSERT INTO sesiones (telefono, etapa, producto_id, producto_seleccionado, valor, nombre, direccion, actualizado_en)\nVALUES ($1, $2, $3, $4, $5, $6, $7, NOW())\nON CONFLICT (telefono) DO UPDATE SET\n  etapa = EXCLUDED.etapa,\n  producto_id = EXCLUDED.producto_id,\n  producto_seleccionado = EXCLUDED.producto_seleccionado,\n  valor = EXCLUDED.valor,\n  nombre = EXCLUDED.nombre,\n  direccion = EXCLUDED.direccion,\n  actualizado_en = NOW();",
+        "options": {
+          "queryReplacement": "={{ [$('Procesar Respuesta IA').first().json.telefono, $('Procesar Respuesta IA').first().json.etapa, $('Procesar Respuesta IA').first().json.producto_id, $('Procesar Respuesta IA').first().json.producto_seleccionado, Number($('Procesar Respuesta IA').first().json.valor) || 0, $('Procesar Respuesta IA').first().json.nombre, $('Procesar Respuesta IA').first().json.direccion] }}"
+        }
       },
       "id": "node-save-sesion",
       "name": "Guardar Sesion",
-      "type": "n8n-nodes-base.googleSheets",
-      "typeVersion": 4.5,
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
       "position": [720, 360],
       "credentials": {
-        "googleSheetsOAuth2Api": {
-          "id": "YOUR_GOOGLE_SHEETS_CRED_ID",
-          "name": "Google Sheets account"
+        "postgres": {
+          "id": "YOUR_POSTGRES_CRED_ID",
+          "name": "Postgres account"
         }
       }
     },
@@ -339,15 +313,15 @@
     },
     {
       "parameters": {
-        "content": "## Flujo de Ventas IA por WhatsApp\n\n**Mejoras incluidas:**\n1. Cada producto tiene un **id unico** (columna `id` en inventario) que se guarda en `sesiones` y `pedidos`.\n2. Las **cancelaciones** de pedidos en curso se registran en `pedidos` con `estado = cancelado` (los completados quedan `registrado`).\n3. **Memoria por cliente en PostgreSQL** (nodo *Postgres Chat Memory*, clave = telefono): la IA recuerda la conversacion.\n\n**Antes de usar:** reemplaza `YOUR_SPREADSHEET_ID`, selecciona credenciales de Google Sheets, OpenAI, Header Auth (WhatsApp) y Postgres en cada nodo.",
-        "height": 300,
-        "width": 460
+        "content": "## Flujo de Ventas IA por WhatsApp\n\n**Almacenamiento:**\n- `sesiones` -> **PostgreSQL** (tabla `sesiones`, UPSERT atomico por `telefono`). Soporta muchos clientes en paralelo sin condiciones de carrera.\n- `inventario` y `pedidos` -> **Google Sheets**.\n- Memoria de conversacion -> **PostgreSQL** (tabla `n8n_chat_histories`).\n\n**Mejoras:** id unico de producto, registro de pedidos cancelados (`estado`), memoria por cliente.\n\n**Antes de usar:** corre el SQL de `sql/setup_postgres.sql`, reemplaza `YOUR_SPREADSHEET_ID` y selecciona credenciales de Google Sheets, OpenAI, Header Auth (WhatsApp) y Postgres.",
+        "height": 320,
+        "width": 470
       },
       "id": "node-sticky",
       "name": "Notas",
       "type": "n8n-nodes-base.stickyNote",
       "typeVersion": 1,
-      "position": [-1120, -300]
+      "position": [-1120, -320]
     }
   ],
   "connections": {
