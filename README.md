@@ -2,6 +2,11 @@
 
 Agente conversacional por WhatsApp que detecta intención de compra con **GPT-4o-mini**, matchea el producto contra un catálogo en **Google Sheets**, recolecta los datos del cliente paso a paso y registra el pedido automáticamente. Todo orquestado en **n8n**.
 
+> ✨ **Mejoras incluidas en esta versión:**
+> 1. **Identificador único por producto** (columna `id`) que se propaga a `sesiones` y `pedidos`.
+> 2. **Registro de cancelaciones**: si el cliente cancela un pedido en curso, se guarda en `pedidos` con `estado = cancelado` (los completados quedan `registrado`).
+> 3. **Memoria de conversación en PostgreSQL** (nodo *Postgres Chat Memory*, clave = teléfono): la IA recuerda los mensajes previos de cada cliente.
+
 ---
 
 ## 📦 Contenido del paquete
@@ -50,12 +55,14 @@ El cliente puede **cancelar** o **empezar de nuevo** en cualquier momento (la IA
 ```json
 {
   "etapa": "confirmar_producto",
+  "producto_id": "P001",
   "producto_seleccionado": "Camisa Blanca",
   "valor": 25000,
   "nombre": "",
   "direccion": "",
   "respuesta": "Sí, tenemos *Camisa Blanca* por *$25.000*. ¿Deseas pedirla?",
-  "guardar_pedido": false,
+  "registrar_pedido": false,
+  "estado_pedido": "registrado",
   "limpiar_sesion": false
 }
 ```
@@ -93,6 +100,24 @@ En cada nodo de Google Sheets (**Leer Sesiones, Leer Inventario, Guardar Sesión
 En el nodo **OpenAI Chat Model**:
 - Selecciona tu credencial **OpenAI** (tu API key). Modelo: `gpt-4o-mini`.
 
+En el nodo **Postgres Chat Memory** (memoria de conversación):
+- Selecciona tu credencial **Postgres** (host, puerto, base de datos, usuario, contraseña).
+- `Table Name`: `n8n_chat_histories` (la tabla se crea sola en la primera ejecución).
+- `Session Key`: ya viene como `{{ $('Construir Contexto').first().json.telefono }}` → una memoria independiente por cada teléfono.
+- `Context Window Length`: `15` (cuántos mensajes recuerda; ajústalo según necesites).
+
+> 🐘 **PostgreSQL con Docker** (si lo necesitas en tu VPS):
+> ```bash
+> docker run -d --name postgres-n8n \
+>   -e POSTGRES_USER=n8n \
+>   -e POSTGRES_PASSWORD=tu_password \
+>   -e POSTGRES_DB=n8n_memory \
+>   -p 5432:5432 \
+>   -v pgdata:/var/lib/postgresql/data \
+>   postgres:16
+> ```
+> Si n8n y Postgres están en el mismo `docker-compose`, usa el nombre del servicio (ej. `postgres-n8n`) como host en la credencial.
+
 En el nodo **Enviar WhatsApp**:
 - Crea una credencial **Header Auth** (`httpHeaderAuth`):
   - **Name:** `Authorization`
@@ -124,7 +149,8 @@ En el nodo **Enviar WhatsApp**:
 ## 🧪 Casos de prueba sugeridos (Fase 6)
 - ✅ Cliente indeciso (pregunta varias veces antes de decidir).
 - ✅ Producto inexistente → la IA pide aclaración o sugiere alternativas.
-- ✅ Cliente cancela a mitad → la sesión se reinicia.
+- ✅ Cliente cancela a mitad (con producto elegido) → se registra en `pedidos` con `estado = cancelado` y la sesión se reinicia.
+- ✅ Cliente vuelve a escribir días después → la IA recuerda la conversación previa (memoria Postgres).
 - ✅ Varios productos en un mensaje → la IA pide elegir uno (un pedido = un producto).
 - ✅ Mensajes fuera de contexto → la IA reencauza la conversación.
 

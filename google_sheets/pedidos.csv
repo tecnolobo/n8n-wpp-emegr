@@ -1,1 +1,1 @@
-fecha,producto,valor,nombre,telefono,direccion
+fecha,id_producto,producto,valor,nombre,telefono,direccion,estado
