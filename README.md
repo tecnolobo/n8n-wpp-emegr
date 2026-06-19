@@ -4,9 +4,10 @@ Agente conversacional por WhatsApp que detecta intención de compra con **GPT-4o
 
 > ✨ **Mejoras incluidas en esta versión:**
 > 1. **Identificador único por producto** (columna `id`) que se propaga a `sesiones` y `pedidos`.
-> 2. **Registro de cancelaciones**: si el cliente cancela un pedido en curso, se guarda en `pedidos` con `estado = cancelado` (los completados quedan `registrado`).
+> 2. **Cancelaciones por actualización**: si el cliente cancela un pedido ya registrado, se **actualiza esa misma fila** en `pedidos` cambiando `estado` de `registrado` a `cancelado` (no se crea ni se borra ningún registro).
 > 3. **Memoria de conversación en PostgreSQL** (nodo *Postgres Chat Memory*, clave = teléfono): la IA recuerda los mensajes previos de cada cliente.
-> 4. **`sesiones` migradas a PostgreSQL** (UPSERT atómico por `telefono`): soporta muchos clientes en paralelo **sin condiciones de carrera**. `inventario` y `pedidos` siguen en Google Sheets.
+> 4. **`sesiones` migradas a PostgreSQL** (UPSERT atómico por `telefono`): soporta muchos clientes en paralelo **sin condiciones de carrera**.
+> 5. **Inventario en caché (PostgreSQL)**: el catálogo se lee desde la tabla `inventario` de Postgres en cada mensaje (rápido). Un workflow aparte (*Sync Inventario*) lo refresca **solo cuando el Google Sheet cambia**, no en cada mensaje.
 
 ---
 
@@ -14,17 +15,21 @@ Agente conversacional por WhatsApp que detecta intención de compra con **GPT-4o
 
 | Archivo | Descripción |
 |---|---|
-| `n8n_whatsapp_ventas_workflow.json` | Workflow listo para **importar** en n8n |
+| `n8n_whatsapp_ventas_workflow.json` | Workflow principal (conversación) listo para **importar** en n8n |
+| `n8n_sync_inventario_workflow.json` | Workflow de **sincronización** del inventario (Sheets → Postgres) |
 | `google_sheets/inventario.csv` | Plantilla del catálogo con datos de ejemplo |
 | `google_sheets/pedidos.csv` | Plantilla de pedidos (solo encabezados) |
-| `sql/setup_postgres.sql` | Script SQL para crear la tabla `sesiones` en PostgreSQL |
+| `sql/setup_postgres.sql` | Script SQL para crear las tablas `sesiones` e `inventario` en PostgreSQL |
 
 ---
 
 ## 🧠 Cómo funciona (arquitectura)
 
 ```
-WhatsApp ──► [Webhook POST] ──► Extraer Mensaje ──► Leer Sesiones ──► Leer Inventario
+                      (PostgreSQL cache)        (workflow aparte: Sync Inventario)
+                       tabla inventario  ◄──────  Google Sheet inventario (al cambiar)
+
+WhatsApp ──► [Webhook POST] ──► Extraer Mensaje ──► Leer Sesiones(PG) ──► Leer Inventario(PG)
                                                                               │
                                                                               ▼
                                                                      Construir Contexto
@@ -32,17 +37,21 @@ WhatsApp ──► [Webhook POST] ──► Extraer Mensaje ──► Leer Sesio
                                                           ┌───────────────────┴──────────────────┐
                                                           │   AI Agent (GPT-4o-mini)              │
                                                           │   + OpenAI Chat Model                 │
+                                                          │   + Postgres Chat Memory              │
                                                           │   + Parser de Salida (JSON)           │
                                                           └───────────────────┬──────────────────┘
                                                                               ▼
                                                                Procesar Respuesta IA
                                                                               ▼
-                                                                     Guardar Sesión
+                                                                 Guardar Sesión (UPSERT PG)
                                                                               ▼
-                                                                  ¿Guardar Pedido? ──true──► Registrar Pedido
-                                                                              │                      │
-                                                                            false                    │
-                                                                              └────────► Enviar WhatsApp ◄┘
+                                                          ┌──────── Switch: accion_pedido ────────┐
+                                                  crear ──►│  Registrar Pedido (append, registrado)│
+                                               cancelar ──►│  Cancelar Pedido (update -> cancelado)│
+                                                ninguna ──►│  (nada)                               │
+                                                          └───────────────────┬──────────────────┘
+                                                                              ▼
+                                                                        Enviar WhatsApp
 ```
 
 **Decisión de diseño clave:** en lugar de un `Switch` rígido con una rama por etapa, el **AI Agent maneja toda la máquina de estados**. Recibe el catálogo + el estado actual de la sesión + el mensaje nuevo, y devuelve un JSON estructurado que indica la **siguiente etapa**, los **datos acumulados**, la **respuesta al cliente** y si se debe **guardar el pedido**. Esto es mucho más robusto frente a clientes indecisos, mensajes fuera de contexto o varios productos en un mensaje.
@@ -62,18 +71,22 @@ El cliente puede **cancelar** o **empezar de nuevo** en cualquier momento (la IA
   "nombre": "",
   "direccion": "",
   "respuesta": "Sí, tenemos *Camisa Blanca* por *$25.000*. ¿Deseas pedirla?",
-  "registrar_pedido": false,
-  "estado_pedido": "registrado",
+  "accion_pedido": "ninguna",
   "limpiar_sesion": false
 }
 ```
+
+> El campo **`accion_pedido`** controla la hoja `pedidos`:
+> - `crear` → agrega una fila nueva con `estado = registrado` (al confirmar un pedido).
+> - `cancelar` → **actualiza** la fila existente del cliente (match por `telefono`) cambiando `estado` a `cancelado`. No crea ni borra filas.
+> - `ninguna` → no toca `pedidos` (incluye abandonar un pedido aún no confirmado).
 
 ---
 
 ## 🚀 Instalación paso a paso
 
 ### 1. Crear las tablas en PostgreSQL
-1. Levanta PostgreSQL (ver comando Docker más abajo) y ejecuta el script `sql/setup_postgres.sql`. Crea la tabla **`sesiones`** (clave primaria `telefono`).
+1. Levanta PostgreSQL (ver comando Docker más abajo) y ejecuta el script `sql/setup_postgres.sql`. Crea las tablas **`sesiones`** (clave `telefono`) e **`inventario`** (caché del catálogo, clave `id`).
 2. La tabla de memoria **`n8n_chat_histories`** se crea sola en la primera ejecución del nodo *Postgres Chat Memory*.
 
 ### 2. Crear los Google Sheets (solo `inventario` y `pedidos`)
@@ -91,19 +104,25 @@ El cliente puede **cancelar** o **empezar de nuevo** en cualquier momento (la IA
 3. Puedes importar los CSV de la carpeta `google_sheets/` (Archivo → Importar) para tener la estructura y datos de ejemplo del catálogo.
 4. Copia el **Spreadsheet ID** de la URL: `https://docs.google.com/spreadsheets/d/`**`ESTE_ES_EL_ID`**`/edit`.
 
-### 3. Importar el workflow en n8n
-1. En n8n: **Workflows → Import from File** → selecciona `n8n_whatsapp_ventas_workflow.json`.
-2. El workflow aparecerá con todos los nodos conectados.
+### 3. Importar los workflows en n8n
+1. **Workflows → Import from File** → importa `n8n_whatsapp_ventas_workflow.json` (flujo principal).
+2. Importa también `n8n_sync_inventario_workflow.json` (sincronización de inventario).
 
 ### 4. Configurar credenciales
-En los nodos de **Google Sheets** (**Leer Inventario, Registrar Pedido**):
-- Selecciona tu credencial **Google Sheets OAuth2**.
-- En `Document` → pega tu **Spreadsheet ID**. Reemplaza el placeholder `YOUR_SPREADSHEET_ID` en ambos nodos.
-- Verifica que `Sheet` apunte a `inventario` y `pedidos` respectivamente.
 
-En los nodos de **PostgreSQL** (**Leer Sesiones, Guardar Sesion**):
-- Selecciona tu credencial **Postgres** (la misma del nodo de memoria).
-- Ya traen las consultas SQL listas (SELECT por `telefono` y UPSERT `ON CONFLICT`). No necesitas tocar nada.
+**Flujo principal — nodos de Google Sheets** (**Registrar Pedido, Cancelar Pedido**):
+- Selecciona tu credencial **Google Sheets OAuth2** y pega tu **Spreadsheet ID** (reemplaza `YOUR_SPREADSHEET_ID`). Ambos apuntan a la hoja `pedidos`.
+
+**Flujo principal — nodos de PostgreSQL** (**Leer Sesiones, Leer Inventario, Guardar Sesion**):
+- Selecciona tu credencial **Postgres** (la misma de la memoria).
+- Ya traen el SQL listo (SELECT sesión por `telefono`, SELECT del catálogo desde `inventario`, y UPSERT de sesión). No hay que tocar nada.
+
+**Workflow Sync Inventario** (`n8n_sync_inventario_workflow.json`):
+- Nodo *Trigger - Cambio Inventario* y *Leer Inventario (Sheets)*: credencial **Google Sheets** + `Spreadsheet ID`, hoja `inventario`.
+- Nodos *Upsert Inventario* y *Eliminar Borrados*: credencial **Postgres**.
+- **Ejecuta una vez** el trigger manual (*Primera Carga*) para llenar la tabla `inventario`, luego **activa** el workflow para que se sincronice automáticamente cuando el Sheet cambie.
+
+> ⚡ **Por qué dos workflows:** el principal lee el catálogo desde Postgres en cada mensaje (rápido, sin límites de Sheets). El de sincronización solo toca Google Sheets cuando el inventario cambia.
 
 En el nodo **OpenAI Chat Model**:
 - Selecciona tu credencial **OpenAI** (tu API key). Modelo: `gpt-4o-mini`.
@@ -157,7 +176,8 @@ En el nodo **Enviar WhatsApp**:
 ## 🧪 Casos de prueba sugeridos (Fase 6)
 - ✅ Cliente indeciso (pregunta varias veces antes de decidir).
 - ✅ Producto inexistente → la IA pide aclaración o sugiere alternativas.
-- ✅ Cliente cancela a mitad (con producto elegido) → se registra en `pedidos` con `estado = cancelado` y la sesión se reinicia.
+- ✅ Cliente cancela a mitad, **antes de confirmar** → `accion_pedido = ninguna`, solo se reinicia la sesión (no había pedido que cancelar).
+- ✅ Cliente cancela un pedido **ya registrado** → la fila existente en `pedidos` pasa de `registrado` a `cancelado` (no se crea otra fila).
 - ✅ Cliente vuelve a escribir días después → la IA recuerda la conversación previa (memoria Postgres).
 - ✅ Varios productos en un mensaje → la IA pide elegir uno (un pedido = un producto).
 - ✅ Mensajes fuera de contexto → la IA reencauza la conversación.
@@ -165,8 +185,9 @@ En el nodo **Enviar WhatsApp**:
 ---
 
 ## 🔧 Notas técnicas
-- **Versiones de nodos** usadas: Webhook `v2`, Google Sheets `v4.5`, HTTP Request `v4.2`, Code `v2`, If `v2.2`, AI Agent (LangChain) `v1.7`. Al importar en tu instancia, n8n migra automáticamente si tu versión difiere.
-- **Estado:** la sesión se persiste con la operación `Append or Update` de Google Sheets, usando `telefono` como columna de coincidencia (upsert). No se borran filas; al cerrar/cancelar, la IA reinicia la etapa a `inicio` y vacía los campos.
+- **Versiones de nodos** usadas: Webhook `v2`, Google Sheets `v4.5`, Postgres `v2.6`, HTTP Request `v4.2`, Code `v2`, Switch `v3.2`, AI Agent (LangChain) `v1.7`. Al importar, n8n migra automáticamente si tu versión difiere.
+- **Sesiones e inventario en PostgreSQL:** la sesión se persiste con `INSERT ... ON CONFLICT (telefono) DO UPDATE` (UPSERT atómico). El catálogo se lee de la tabla `inventario` (caché), que el workflow *Sync Inventario* mantiene al día desde Google Sheets.
+- **Cancelación = UPDATE:** el nodo *Cancelar Pedido* usa la operación `update` de Google Sheets con `telefono` como columna de coincidencia y escribe `estado = cancelado` sobre la fila existente. Si un mismo teléfono tuviera varias filas, se actualizan las coincidentes; para distinguir pedidos múltiples por cliente, añade y matchea por un `pedido_id` único.
 - **Mensajes no-texto** (status, imágenes, audios) se ignoran en el nodo `Extraer Mensaje`.
 - **API de Meta:** se usa `graph.facebook.com/v21.0`. Actualiza la versión si Meta lo requiere.
 
@@ -179,4 +200,4 @@ En el nodo **Enviar WhatsApp**:
 - 🖼️ Envío de imagen del producto al confirmar.
 - 💳 Integración con pasarela de pago (Stripe / Mercado Pago link).
 - 📊 Dashboard de pedidos en vez de solo Sheets.
-- ⚡ Migrar sesiones a Redis si el volumen crece.
+- 🆔 `pedido_id` único por pedido para cancelaciones 100% precisas con historial.
