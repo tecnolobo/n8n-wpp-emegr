@@ -3,16 +3,20 @@
 --  Ejecuta este script UNA vez en tu base de datos.
 -- ============================================================
 
--- Tabla de SESIONES (estado de conversacion por cliente)
--- La clave primaria es el telefono -> permite UPSERT atomico (sin condiciones de carrera).
+-- Tabla de SESIONES (estado de conversacion por cliente/canal)
+-- 'session' es el identificador unico del cliente (TEXT, alfanumerico):
+--   - WhatsApp -> el numero de telefono (ej. "5215512345678")
+--   - Facebook Messenger (futuro) -> el PSID (id alfanumerico de la pagina)
+-- Clave primaria 'session' -> permite UPSERT atomico (sin condiciones de carrera).
 CREATE TABLE IF NOT EXISTS sesiones (
-    telefono              TEXT PRIMARY KEY,
+    session               TEXT PRIMARY KEY,
     etapa                 TEXT        NOT NULL DEFAULT 'inicio',
     producto_id           TEXT        DEFAULT '',
     producto_seleccionado TEXT        DEFAULT '',
     valor                 NUMERIC     DEFAULT 0,
     nombre                TEXT        DEFAULT '',
     direccion             TEXT        DEFAULT '',
+    ultimo_pedido_id      TEXT        DEFAULT '',   -- id del ultimo pedido registrado (para cancelaciones precisas)
     actualizado_en        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -23,7 +27,7 @@ CREATE INDEX IF NOT EXISTS idx_sesiones_actualizado ON sesiones (actualizado_en)
 -- SOLO cuando el inventario cambia (o en la primera carga manual).
 -- El flujo principal lee el catalogo desde aqui (rapido), no desde Sheets en cada mensaje.
 CREATE TABLE IF NOT EXISTS inventario (
-    id          TEXT PRIMARY KEY,
+    id          TEXT PRIMARY KEY,   -- identificador unico del producto (alfanumerico, ej. "P001")
     producto    TEXT    NOT NULL,
     valor       NUMERIC DEFAULT 0,
     descripcion TEXT    DEFAULT ''

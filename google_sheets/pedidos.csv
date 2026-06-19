@@ -1,1 +1,1 @@
-fecha,id_producto,producto,valor,nombre,telefono,direccion,estado
+pedido_id,fecha,id_producto,producto,valor,nombre,telefono,direccion,estado

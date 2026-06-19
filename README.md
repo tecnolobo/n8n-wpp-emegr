@@ -3,11 +3,11 @@
 Agente conversacional por WhatsApp que detecta intención de compra con **GPT-4o-mini**, matchea el producto contra un catálogo en **Google Sheets**, recolecta los datos del cliente paso a paso y registra el pedido automáticamente. Todo orquestado en **n8n**.
 
 > ✨ **Mejoras incluidas en esta versión:**
-> 1. **Identificador único por producto** (columna `id`) que se propaga a `sesiones` y `pedidos`.
-> 2. **Cancelaciones por actualización**: si el cliente cancela un pedido ya registrado, se **actualiza esa misma fila** en `pedidos` cambiando `estado` de `registrado` a `cancelado` (no se crea ni se borra ningún registro).
-> 3. **Memoria de conversación en PostgreSQL** (nodo *Postgres Chat Memory*, clave = teléfono): la IA recuerda los mensajes previos de cada cliente.
-> 4. **`sesiones` migradas a PostgreSQL** (UPSERT atómico por `telefono`): soporta muchos clientes en paralelo **sin condiciones de carrera**.
-> 5. **Inventario en caché (PostgreSQL)**: el catálogo se lee desde la tabla `inventario` de Postgres en cada mensaje (rápido). Un workflow aparte (*Sync Inventario*) lo refresca **solo cuando el Google Sheet cambia**, no en cada mensaje.
+> 1. **Identificador único por producto** (columna `id`, string) que se propaga a `sesiones` y `pedidos`.
+> 2. **Cancelación 100% precisa por `pedido_id`**: cada pedido recibe un id único (string, ej. `PED-xxxx`). Al cancelar, se **actualiza esa fila exacta** en `pedidos` cambiando `estado` de `registrado` a `cancelado` (no se crea ni se borra ningún registro, aunque el cliente tenga varios pedidos).
+> 3. **Memoria de conversación en PostgreSQL** (nodo *Postgres Chat Memory*): la IA recuerda los mensajes previos de cada cliente.
+> 4. **`sesiones` en PostgreSQL** con la columna **`session`** (TEXT) como identificador único del cliente — vale el teléfono en WhatsApp y es compatible con el **PSID alfanumérico de Facebook** a futuro. UPSERT atómico → soporta muchos clientes en paralelo sin condiciones de carrera.
+> 5. **Inventario en caché (PostgreSQL)**: el catálogo se lee desde la tabla `inventario` en cada mensaje (rápido). El workflow *Sync Inventario* lo refresca **solo cuando el Google Sheet cambia**.
 
 ---
 
@@ -77,8 +77,8 @@ El cliente puede **cancelar** o **empezar de nuevo** en cualquier momento (la IA
 ```
 
 > El campo **`accion_pedido`** controla la hoja `pedidos`:
-> - `crear` → agrega una fila nueva con `estado = registrado` (al confirmar un pedido).
-> - `cancelar` → **actualiza** la fila existente del cliente (match por `telefono`) cambiando `estado` a `cancelado`. No crea ni borra filas.
+> - `crear` → agrega una fila nueva con `estado = registrado` y un `pedido_id` único (al confirmar un pedido).
+> - `cancelar` → **actualiza** la fila exacta (match por `pedido_id`, recordado en la sesión) cambiando `estado` a `cancelado`. No crea ni borra filas.
 > - `ninguna` → no toca `pedidos` (incluye abandonar un pedido aún no confirmado).
 
 ---
@@ -187,7 +187,8 @@ En el nodo **Enviar WhatsApp**:
 ## 🔧 Notas técnicas
 - **Versiones de nodos** usadas: Webhook `v2`, Google Sheets `v4.5`, Postgres `v2.6`, HTTP Request `v4.2`, Code `v2`, Switch `v3.2`, AI Agent (LangChain) `v1.7`. Al importar, n8n migra automáticamente si tu versión difiere.
 - **Sesiones e inventario en PostgreSQL:** la sesión se persiste con `INSERT ... ON CONFLICT (telefono) DO UPDATE` (UPSERT atómico). El catálogo se lee de la tabla `inventario` (caché), que el workflow *Sync Inventario* mantiene al día desde Google Sheets.
-- **Cancelación = UPDATE:** el nodo *Cancelar Pedido* usa la operación `update` de Google Sheets con `telefono` como columna de coincidencia y escribe `estado = cancelado` sobre la fila existente. Si un mismo teléfono tuviera varias filas, se actualizan las coincidentes; para distinguir pedidos múltiples por cliente, añade y matchea por un `pedido_id` único.
+- **Cancelación = UPDATE por `pedido_id`:** al registrar un pedido se genera un `pedido_id` único (string) que se guarda en `pedidos` y en `sesiones.ultimo_pedido_id`. El nodo *Cancelar Pedido* usa la operación `update` de Google Sheets matcheando por `pedido_id`, así cancela exactamente el pedido correcto aunque el cliente tenga varios.
+- **Identificador de cliente (`session`):** la tabla `sesiones` usa la columna `session` (TEXT) como clave. Hoy contiene el teléfono de WhatsApp; mañana puede contener el PSID alfanumérico de Facebook Messenger sin cambiar el esquema.
 - **Mensajes no-texto** (status, imágenes, audios) se ignoran en el nodo `Extraer Mensaje`.
 - **API de Meta:** se usa `graph.facebook.com/v21.0`. Actualiza la versión si Meta lo requiere.
 
@@ -200,4 +201,5 @@ En el nodo **Enviar WhatsApp**:
 - 🖼️ Envío de imagen del producto al confirmar.
 - 💳 Integración con pasarela de pago (Stripe / Mercado Pago link).
 - 📊 Dashboard de pedidos en vez de solo Sheets.
-- 🆔 `pedido_id` único por pedido para cancelaciones 100% precisas con historial.
+- 💬 Soporte de **Facebook Messenger** (reutilizando la columna `session` para el PSID).
+con historial.

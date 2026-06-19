@@ -1,5 +1,5 @@
 {
-  "name": "Ventas IA - WhatsApp + Sheets + Postgres (v3)",
+  "name": "Ventas IA - WhatsApp + Sheets + Postgres (v4)",
   "nodes": [
     {
       "parameters": {
@@ -44,7 +44,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Parseo del payload entrante de WhatsApp Cloud API\nconst body = $input.first().json.body || $input.first().json;\nconst value = body?.entry?.[0]?.changes?.[0]?.value;\nconst message = value?.messages?.[0];\n\n// Si no es un mensaje de texto (es status, imagen, etc.) detenemos el flujo\nif (!message || message.type !== 'text') {\n  return [];\n}\n\nconst telefono = message.from;\nconst texto = message.text.body;\nconst nombrePerfil = value?.contacts?.[0]?.profile?.name || '';\nconst phoneNumberId = value?.metadata?.phone_number_id || '';\n\nreturn [{\n  json: { telefono, texto, nombrePerfil, phoneNumberId }\n}];"
+        "jsCode": "// Parseo del payload entrante de WhatsApp Cloud API\nconst body = $input.first().json.body || $input.first().json;\nconst value = body?.entry?.[0]?.changes?.[0]?.value;\nconst message = value?.messages?.[0];\n\n// Si no es un mensaje de texto (es status, imagen, etc.) detenemos el flujo\nif (!message || message.type !== 'text') {\n  return [];\n}\n\n// 'session' es el identificador unico del cliente (string/alfanumerico).\n// WhatsApp -> message.from (telefono). Facebook (futuro) -> seria el PSID.\nconst session = String(message.from);\nconst telefono = String(message.from);\nconst texto = message.text.body;\nconst nombrePerfil = value?.contacts?.[0]?.profile?.name || '';\nconst phoneNumberId = value?.metadata?.phone_number_id || '';\n\nreturn [{\n  json: { session, telefono, texto, nombrePerfil, phoneNumberId }\n}];"
       },
       "id": "node-extract",
       "name": "Extraer Mensaje",
@@ -55,9 +55,9 @@
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "SELECT etapa, producto_id, producto_seleccionado, valor, nombre, direccion\nFROM sesiones\nWHERE telefono = $1;",
+        "query": "SELECT etapa, producto_id, producto_seleccionado, valor, nombre, direccion, ultimo_pedido_id\nFROM sesiones\nWHERE session = $1;",
         "options": {
-          "queryReplacement": "={{ [$json.telefono] }}"
+          "queryReplacement": "={{ [$json.session] }}"
         }
       },
       "id": "node-read-sesiones",
@@ -94,7 +94,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Construye el contexto para el AI Agent: catalogo + estado de sesion + mensaje\nconst msg = $('Extraer Mensaje').first().json;\nconst telefono = String(msg.telefono);\n\n// Catalogo (cache en PostgreSQL, incluye el identificador unico de cada producto)\nconst inv = $('Leer Inventario').all().map(i => i.json).filter(r => r.producto);\nconst catalogo = inv.map(r => `- [${r.id}] ${r.producto} | $${r.valor} | ${r.descripcion || ''}`).join('\\n');\n\n// Sesion actual del cliente (desde PostgreSQL, ya filtrada por telefono)\nconst sesionRows = $('Leer Sesiones').all().map(i => i.json);\nconst sesion = sesionRows[0] || {};\n\nconst estado = {\n  etapa: sesion.etapa || 'inicio',\n  producto_id: sesion.producto_id || '',\n  producto_seleccionado: sesion.producto_seleccionado || '',\n  valor: sesion.valor || '',\n  nombre: sesion.nombre || '',\n  direccion: sesion.direccion || ''\n};\n\nconst prompt = `CATALOGO DISPONIBLE (formato: [id] producto | precio | descripcion):\\n${catalogo || '(catalogo vacio)'}\\n\\nESTADO ACTUAL DE LA CONVERSACION:\\n${JSON.stringify(estado)}\\n\\nMENSAJE NUEVO DEL CLIENTE:\\n\"${msg.texto}\"`;\n\nreturn [{\n  json: {\n    telefono,\n    phoneNumberId: msg.phoneNumberId,\n    prompt,\n    ...estado\n  }\n}];"
+        "jsCode": "// Construye el contexto para el AI Agent: catalogo + estado de sesion + mensaje\nconst msg = $('Extraer Mensaje').first().json;\nconst session = String(msg.session);\n\n// Catalogo (cache en PostgreSQL, incluye el identificador unico de cada producto)\nconst inv = $('Leer Inventario').all().map(i => i.json).filter(r => r.producto);\nconst catalogo = inv.map(r => `- [${r.id}] ${r.producto} | $${r.valor} | ${r.descripcion || ''}`).join('\\n');\n\n// Sesion actual del cliente (desde PostgreSQL, ya filtrada por session)\nconst sesionRows = $('Leer Sesiones').all().map(i => i.json);\nconst sesion = sesionRows[0] || {};\n\nconst estado = {\n  etapa: sesion.etapa || 'inicio',\n  producto_id: sesion.producto_id || '',\n  producto_seleccionado: sesion.producto_seleccionado || '',\n  valor: sesion.valor || '',\n  nombre: sesion.nombre || '',\n  direccion: sesion.direccion || ''\n};\n\nconst prompt = `CATALOGO DISPONIBLE (formato: [id] producto | precio | descripcion):\\n${catalogo || '(catalogo vacio)'}\\n\\nESTADO ACTUAL DE LA CONVERSACION:\\n${JSON.stringify(estado)}\\n\\nMENSAJE NUEVO DEL CLIENTE:\\n\"${msg.texto}\"`;\n\nreturn [{\n  json: {\n    session,\n    telefono: msg.telefono,\n    phoneNumberId: msg.phoneNumberId,\n    prompt,\n    ...estado\n  }\n}];"
       },
       "id": "node-build-context",
       "name": "Construir Contexto",
@@ -108,7 +108,7 @@
         "text": "={{ $json.prompt }}",
         "hasOutputParser": true,
         "options": {
-          "systemMessage": "Eres un asistente de ventas por WhatsApp, cercano y natural. Recibes el CATALOGO disponible (cada producto tiene un id unico entre corchetes), el ESTADO ACTUAL de la conversacion y el MENSAJE NUEVO del cliente. Tienes MEMORIA de los mensajes anteriores de este cliente, usala para no repetir preguntas. Tu trabajo es hacer avanzar la venta paso a paso y devolver SIEMPRE un JSON con los campos: etapa, producto_id, producto_seleccionado, valor, nombre, direccion, respuesta, accion_pedido, limpiar_sesion.\n\nETAPAS (en orden): inicio -> confirmar_producto -> pedir_nombre -> pedir_direccion -> confirmar_pedido -> cerrado.\n\nREGLAS POR ETAPA:\n- inicio: Detecta intencion de compra y matchea el mensaje contra el CATALOGO. Si hay coincidencia, responde confirmando producto y precio y pregunta si desea pedirlo; pon etapa=confirmar_producto, producto_id=el id exacto del catalogo (ej. P001), producto_seleccionado=nombre exacto del catalogo, valor=precio numerico. Si NO hay coincidencia, pide que aclare o sugiere productos del catalogo; etapa sigue en inicio.\n- confirmar_producto: Si el cliente confirma (si, dale, quiero, lo pido), pide su NOMBRE y pon etapa=pedir_nombre. Si menciona otro producto, vuelve a matchear (actualiza producto_id) y quedate en confirmar_producto. Si dice que no, despidete amablemente, etapa=inicio, limpiar_sesion=true.\n- pedir_nombre: Guarda el nombre en el campo nombre, agradece y pide la DIRECCION de entrega; etapa=pedir_direccion.\n- pedir_direccion: Guarda la direccion en el campo direccion. Muestra un RESUMEN del pedido (producto en *negrita*, precio, nombre, direccion) y pide CONFIRMACION final (responder SI para registrar); etapa=confirmar_pedido.\n- confirmar_pedido: Si confirma, responde un mensaje de cierre tipo '¡Pedido registrado! Te contactamos pronto.'; pon accion_pedido='crear', etapa=cerrado, limpiar_sesion=true. Si no confirma o quiere cambiar algo, ajusta y mantente en la etapa adecuada; accion_pedido='ninguna'.\n\nCAMPO accion_pedido (controla la hoja pedidos): puede ser 'crear', 'cancelar' o 'ninguna'.\n- 'crear': SOLO al confirmar un pedido NUEVO en la etapa confirmar_pedido. Se agregara una fila en pedidos con estado 'registrado'.\n- 'cancelar': SOLO cuando el cliente pide CANCELAR un pedido que YA fue registrado antes. Esto ocurre tipicamente cuando la etapa actual es 'inicio' o 'cerrado' (no hay un pedido en progreso) y el cliente dice algo como 'quiero cancelar mi pedido'. NO se crea ninguna fila nueva: se cambiara el estado del pedido existente de 'registrado' a 'cancelado'. Responde confirmando la cancelacion.\n- 'ninguna': en cualquier otro caso. IMPORTANTE: si el cliente abandona o cancela un pedido que AUN NO fue confirmado/registrado (esta a mitad del flujo: confirmar_producto, pedir_nombre, pedir_direccion o confirmar_pedido), usa 'ninguna' y solo limpia la sesion; NO hay pedido que cancelar todavia.\n\nREGLAS GENERALES:\n- ACUMULA los datos ya recolectados: nunca borres nombre/direccion/producto si ya estaban llenos (salvo cancelacion o cierre).\n- Usa formato WhatsApp: *negrita* para el producto y el precio. Respuestas cortas, tono de chat.\n- valor SIEMPRE debe ser numerico (sin simbolos). Si no aplica, usa 0.\n- Devuelve unicamente el JSON estructurado solicitado, sin texto adicional fuera del JSON."
+          "systemMessage": "Eres un asistente de ventas por WhatsApp, cercano y natural. Recibes el CATALOGO disponible (cada producto tiene un id unico entre corchetes), el ESTADO ACTUAL de la conversacion y el MENSAJE NUEVO del cliente. Tienes MEMORIA de los mensajes anteriores de este cliente, usala para no repetir preguntas. Tu trabajo es hacer avanzar la venta paso a paso y devolver SIEMPRE un JSON con los campos: etapa, producto_id, producto_seleccionado, valor, nombre, direccion, respuesta, accion_pedido, limpiar_sesion.\n\nETAPAS (en orden): inicio -> confirmar_producto -> pedir_nombre -> pedir_direccion -> confirmar_pedido -> cerrado.\n\nREGLAS POR ETAPA:\n- inicio: Detecta intencion de compra y matchea el mensaje contra el CATALOGO. Si hay coincidencia, responde confirmando producto y precio y pregunta si desea pedirlo; pon etapa=confirmar_producto, producto_id=el id exacto del catalogo (ej. P001), producto_seleccionado=nombre exacto del catalogo, valor=precio numerico. Si NO hay coincidencia, pide que aclare o sugiere productos del catalogo; etapa sigue en inicio.\n- confirmar_producto: Si el cliente confirma (si, dale, quiero, lo pido), pide su NOMBRE y pon etapa=pedir_nombre. Si menciona otro producto, vuelve a matchear (actualiza producto_id) y quedate en confirmar_producto. Si dice que no, despidete amablemente, etapa=inicio, limpiar_sesion=true.\n- pedir_nombre: Guarda el nombre en el campo nombre, agradece y pide la DIRECCION de entrega; etapa=pedir_direccion.\n- pedir_direccion: Guarda la direccion en el campo direccion. Muestra un RESUMEN del pedido (producto en *negrita*, precio, nombre, direccion) y pide CONFIRMACION final (responder SI para registrar); etapa=confirmar_pedido.\n- confirmar_pedido: Si confirma, responde un mensaje de cierre tipo '¡Pedido registrado! Te contactamos pronto.'; pon accion_pedido='crear' y etapa=cerrado. MUY IMPORTANTE: en esta misma respuesta MANTEN llenos producto_id, producto_seleccionado, valor, nombre y direccion con los datos del pedido (no los vacies), porque se usan para registrar la fila. limpiar_sesion=false. Si no confirma o quiere cambiar algo, ajusta y mantente en la etapa adecuada; accion_pedido='ninguna'.\n\nCAMPO accion_pedido (controla la hoja pedidos): puede ser 'crear', 'cancelar' o 'ninguna'.\n- 'crear': SOLO al confirmar un pedido NUEVO en la etapa confirmar_pedido. Se agregara una fila en pedidos con estado 'registrado'.\n- 'cancelar': SOLO cuando el cliente pide CANCELAR un pedido que YA fue registrado antes. Esto ocurre tipicamente cuando la etapa actual es 'inicio' o 'cerrado' (no hay un pedido en progreso) y el cliente dice algo como 'quiero cancelar mi pedido'. NO se crea ninguna fila nueva: se cambiara el estado del pedido existente de 'registrado' a 'cancelado'. Responde confirmando la cancelacion. Pon etapa=inicio.\n- 'ninguna': en cualquier otro caso. IMPORTANTE: si el cliente abandona o cancela un pedido que AUN NO fue confirmado/registrado (esta a mitad del flujo: confirmar_producto, pedir_nombre, pedir_direccion o confirmar_pedido), usa 'ninguna' y solo limpia la sesion (limpiar_sesion=true); NO hay pedido que cancelar todavia.\n\nREGLAS GENERALES:\n- ACUMULA los datos ya recolectados: nunca borres nombre/direccion/producto si ya estaban llenos (salvo cancelacion explicita o cuando el cliente quiere empezar de cero).\n- Usa formato WhatsApp: *negrita* para el producto y el precio. Respuestas cortas, tono de chat.\n- valor SIEMPRE debe ser numerico (sin simbolos). Si no aplica, usa 0.\n- Devuelve unicamente el JSON estructurado solicitado, sin texto adicional fuera del JSON."
         }
       },
       "id": "node-ai-agent",
@@ -144,7 +144,7 @@
     {
       "parameters": {
         "sessionIdType": "customKey",
-        "sessionKey": "={{ $('Construir Contexto').first().json.telefono }}",
+        "sessionKey": "={{ $('Construir Contexto').first().json.session }}",
         "tableName": "n8n_chat_histories",
         "contextWindowLength": 15
       },
@@ -173,7 +173,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Aplana la salida del AI Agent y agrega metadatos del cliente\nconst ai = $json.output || $json;\nconst ctx = $('Construir Contexto').first().json;\n\nconst respuesta = ai.respuesta || 'Disculpa, no entendi. ¿Puedes repetirlo?';\nconst telefono = ctx.telefono;\nconst accion = ['crear', 'cancelar'].includes(ai.accion_pedido) ? ai.accion_pedido : 'ninguna';\n\nreturn [{\n  json: {\n    telefono,\n    phoneNumberId: ctx.phoneNumberId,\n    etapa: ai.etapa || 'inicio',\n    producto_id: ai.producto_id || '',\n    producto_seleccionado: ai.producto_seleccionado || '',\n    valor: (ai.valor === undefined || ai.valor === null) ? '' : ai.valor,\n    nombre: ai.nombre || '',\n    direccion: ai.direccion || '',\n    respuesta,\n    accion_pedido: accion,\n    limpiar_sesion: ai.limpiar_sesion === true,\n    fecha: new Date().toISOString(),\n    wa_payload: {\n      messaging_product: 'whatsapp',\n      to: telefono,\n      type: 'text',\n      text: { body: respuesta }\n    }\n  }\n}];"
+        "jsCode": "// Aplana la salida del AI Agent y agrega metadatos + maneja el pedido_id\nconst ai = $json.output || $json;\nconst ctx = $('Construir Contexto').first().json;\nconst sesionPrev = ($('Leer Sesiones').first() && $('Leer Sesiones').first().json) || {};\nconst prevPedidoId = sesionPrev.ultimo_pedido_id || '';\n\nconst respuesta = ai.respuesta || 'Disculpa, no entendi. ¿Puedes repetirlo?';\nconst session = ctx.session;\nconst accion = ['crear', 'cancelar'].includes(ai.accion_pedido) ? ai.accion_pedido : 'ninguna';\n\n// pedido_id unico (string) para un pedido NUEVO\nconst nuevoPedidoId = 'PED-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);\n\n// id que se guarda en la sesion: si se crea un pedido -> el nuevo; si no -> conserva el anterior\nconst ultimoPedidoId = accion === 'crear' ? nuevoPedidoId : prevPedidoId;\n\nreturn [{\n  json: {\n    session,\n    telefono: ctx.telefono,\n    phoneNumberId: ctx.phoneNumberId,\n    etapa: ai.etapa || 'inicio',\n    producto_id: ai.producto_id || '',\n    producto_seleccionado: ai.producto_seleccionado || '',\n    valor: (ai.valor === undefined || ai.valor === null) ? '' : ai.valor,\n    nombre: ai.nombre || '',\n    direccion: ai.direccion || '',\n    respuesta,\n    accion_pedido: accion,\n    limpiar_sesion: ai.limpiar_sesion === true,\n    fecha: new Date().toISOString(),\n    pedido_id_crear: nuevoPedidoId,\n    pedido_id_cancelar: prevPedidoId,\n    ultimo_pedido_id: ultimoPedidoId,\n    wa_payload: {\n      messaging_product: 'whatsapp',\n      to: ctx.telefono,\n      type: 'text',\n      text: { body: respuesta }\n    }\n  }\n}];"
       },
       "id": "node-process-ai",
       "name": "Procesar Respuesta IA",
@@ -184,9 +184,9 @@
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "INSERT INTO sesiones (telefono, etapa, producto_id, producto_seleccionado, valor, nombre, direccion, actualizado_en)\nVALUES ($1, $2, $3, $4, $5, $6, $7, NOW())\nON CONFLICT (telefono) DO UPDATE SET\n  etapa = EXCLUDED.etapa,\n  producto_id = EXCLUDED.producto_id,\n  producto_seleccionado = EXCLUDED.producto_seleccionado,\n  valor = EXCLUDED.valor,\n  nombre = EXCLUDED.nombre,\n  direccion = EXCLUDED.direccion,\n  actualizado_en = NOW();",
+        "query": "INSERT INTO sesiones (session, etapa, producto_id, producto_seleccionado, valor, nombre, direccion, ultimo_pedido_id, actualizado_en)\nVALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())\nON CONFLICT (session) DO UPDATE SET\n  etapa = EXCLUDED.etapa,\n  producto_id = EXCLUDED.producto_id,\n  producto_seleccionado = EXCLUDED.producto_seleccionado,\n  valor = EXCLUDED.valor,\n  nombre = EXCLUDED.nombre,\n  direccion = EXCLUDED.direccion,\n  ultimo_pedido_id = EXCLUDED.ultimo_pedido_id,\n  actualizado_en = NOW();",
         "options": {
-          "queryReplacement": "={{ [$('Procesar Respuesta IA').first().json.telefono, $('Procesar Respuesta IA').first().json.etapa, $('Procesar Respuesta IA').first().json.producto_id, $('Procesar Respuesta IA').first().json.producto_seleccionado, Number($('Procesar Respuesta IA').first().json.valor) || 0, $('Procesar Respuesta IA').first().json.nombre, $('Procesar Respuesta IA').first().json.direccion] }}"
+          "queryReplacement": "={{ [$('Procesar Respuesta IA').first().json.session, $('Procesar Respuesta IA').first().json.etapa, $('Procesar Respuesta IA').first().json.producto_id, $('Procesar Respuesta IA').first().json.producto_seleccionado, Number($('Procesar Respuesta IA').first().json.valor) || 0, $('Procesar Respuesta IA').first().json.nombre, $('Procesar Respuesta IA').first().json.direccion, $('Procesar Respuesta IA').first().json.ultimo_pedido_id] }}"
         }
       },
       "id": "node-save-sesion",
@@ -275,6 +275,7 @@
         "columns": {
           "mappingMode": "defineBelow",
           "value": {
+            "pedido_id": "={{ $('Procesar Respuesta IA').first().json.pedido_id_crear }}",
             "fecha": "={{ $('Procesar Respuesta IA').first().json.fecha }}",
             "id_producto": "={{ $('Procesar Respuesta IA').first().json.producto_id }}",
             "producto": "={{ $('Procesar Respuesta IA').first().json.producto_seleccionado }}",
@@ -314,9 +315,9 @@
         },
         "columns": {
           "mappingMode": "defineBelow",
-          "matchingColumns": ["telefono"],
+          "matchingColumns": ["pedido_id"],
           "value": {
-            "telefono": "={{ $('Procesar Respuesta IA').first().json.telefono }}",
+            "pedido_id": "={{ $('Procesar Respuesta IA').first().json.pedido_id_cancelar }}",
             "estado": "cancelado"
           }
         },
@@ -368,15 +369,15 @@
     },
     {
       "parameters": {
-        "content": "## Flujo de Ventas IA por WhatsApp (v3)\n\n**Inventario en cache (Postgres):** el catalogo se lee desde la tabla `inventario` de PostgreSQL (no desde Sheets en cada mensaje). El workflow *Sync Inventario* lo refresca solo cuando el Sheet cambia.\n\n**Accion sobre pedidos (Switch):**\n- `crear` -> agrega fila en `pedidos` con estado *registrado*.\n- `cancelar` -> **actualiza** la fila existente del cliente (match por `telefono`) cambiando estado a *cancelado*. No crea ni borra filas.\n- `ninguna` -> no toca `pedidos`.\n\n**Antes de usar:** corre `sql/setup_postgres.sql`, importa y activa *Sync Inventario*, reemplaza `YOUR_SPREADSHEET_ID` y selecciona credenciales (Sheets, OpenAI, Header Auth WhatsApp, Postgres).",
-        "height": 340,
-        "width": 480
+        "content": "## Flujo de Ventas IA por WhatsApp (v4)\n\n**Identificador de cliente:** columna `session` (TEXT) en la tabla `sesiones`. Vale el telefono en WhatsApp y servira para el PSID alfanumerico de Facebook a futuro.\n\n**pedido_id unico:** cada pedido recibe un id string (ej. `PED-xxxx`). Se guarda en `pedidos` y en `sesiones.ultimo_pedido_id`.\n\n**Accion sobre pedidos (Switch):**\n- `crear` -> agrega fila en `pedidos` (estado *registrado*) con su `pedido_id`.\n- `cancelar` -> **actualiza** la fila exacta por `pedido_id` -> estado *cancelado*. No crea ni borra filas.\n- `ninguna` -> no toca `pedidos`.\n\n**Inventario:** se lee de la tabla `inventario` de Postgres (cache); el workflow *Sync Inventario* la refresca solo al cambiar el Sheet.\n\n**Antes de usar:** corre `sql/setup_postgres.sql`, importa/activa *Sync Inventario*, reemplaza `YOUR_SPREADSHEET_ID` y selecciona credenciales (Sheets, OpenAI, Header Auth WhatsApp, Postgres).",
+        "height": 380,
+        "width": 500
       },
       "id": "node-sticky",
       "name": "Notas",
       "type": "n8n-nodes-base.stickyNote",
       "typeVersion": 1,
-      "position": [-1120, -360]
+      "position": [-1120, -400]
     }
   ],
   "connections": {
