@@ -1,9 +1,9 @@
-id,producto,valor,descripcion
-P001,Camisa Blanca,25000,Camisa de algodon manga larga color blanco
-P002,Camisa Negra,25000,Camisa de algodon manga larga color negro
-P003,Pantalon Jean,45000,Pantalon de mezclilla azul corte recto
-P004,Vestido Floral,60000,Vestido de verano estampado floral
-P005,Chaqueta de Cuero,120000,Chaqueta sintetica color negro unisex
-P006,Zapatillas Deportivas,80000,Zapatillas para correr talla 36 al 43
-P007,Gorra Negra,15000,Gorra ajustable color negro
-P008,Bufanda de Lana,18000,Bufanda tejida varios colores
+id,producto,valor,descripcion,imagenes
+P001,Camisa Blanca,25000,Camisa de algodon manga larga color blanco,https://picsum.photos/seed/p001a/600 | https://picsum.photos/seed/p001b/600
+P002,Camisa Negra,25000,Camisa de algodon manga larga color negro,https://picsum.photos/seed/p002a/600 | https://picsum.photos/seed/p002b/600
+P003,Pantalon Jean,45000,Pantalon de mezclilla azul corte recto,https://picsum.photos/seed/p003a/600
+P004,Vestido Floral,60000,Vestido de verano estampado floral,https://picsum.photos/seed/p004a/600 | https://picsum.photos/seed/p004b/600 | https://picsum.photos/seed/p004c/600
+P005,Chaqueta de Cuero,120000,Chaqueta sintetica color negro unisex,https://picsum.photos/seed/p005a/600
+P006,Zapatillas Deportivas,80000,Zapatillas para correr talla 36 al 43,https://picsum.photos/seed/p006a/600 | https://picsum.photos/seed/p006b/600
+P007,Gorra Negra,15000,Gorra ajustable color negro,https://picsum.photos/seed/p007a/600
+P008,Bufanda de Lana,18000,Bufanda tejida varios colores,https://picsum.photos/seed/p008a/600 | https://picsum.photos/seed/p008b/600

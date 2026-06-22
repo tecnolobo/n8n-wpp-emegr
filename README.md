@@ -8,6 +8,7 @@ Agente conversacional por WhatsApp que detecta intención de compra con **GPT-4o
 > 3. **Memoria de conversación en PostgreSQL** (nodo *Postgres Chat Memory*): la IA recuerda los mensajes previos de cada cliente.
 > 4. **`sesiones` en PostgreSQL** con la columna **`session`** (TEXT) como identificador único del cliente — vale el teléfono en WhatsApp y es compatible con el **PSID alfanumérico de Facebook** a futuro. UPSERT atómico → soporta muchos clientes en paralelo sin condiciones de carrera.
 > 5. **Inventario en caché (PostgreSQL)**: el catálogo se lee desde la tabla `inventario` en cada mensaje (rápido). El workflow *Sync Inventario* lo refresca **solo cuando el Google Sheet cambia**.
+> 6. **Imágenes de producto**: cada producto puede tener **una o varias imágenes** (columna `imagenes`, URLs separadas por `|`). Cuando el cliente pide una foto, el bot envía una; si pide **más**, envía la siguiente **que aún no le compartió**, y avisa cuando se acaban.
 
 ---
 
@@ -94,7 +95,9 @@ El cliente puede **cancelar** o **empezar de nuevo** en cualquier momento (la IA
 2. Crea las hojas con estos **nombres exactos** y encabezados en la **fila 1**:
 
 **`inventario`**
-| id | producto | valor | descripcion |
+| id | producto | valor | descripcion | imagenes |
+
+> 🖼️ La columna **`imagenes`** admite **una o varias URLs públicas** de imagen separadas por `|` (también acepta coma o salto de línea). Ej: `https://.../foto1.jpg | https://.../foto2.jpg`. Deben ser **URLs directas y públicas** (WhatsApp las descarga); un enlace de "compartir" de Google Drive **no** funciona como imagen directa — usa el formato `https://drive.google.com/uc?export=view&id=FILE_ID` o un bucket/CDN público.
 
 **`pedidos`**
 | fecha | id_producto | producto | valor | nombre | telefono | direccion | estado |
@@ -180,6 +183,7 @@ En el nodo **Enviar WhatsApp**:
 - ✅ Cliente cancela un pedido **ya registrado** → la fila existente en `pedidos` pasa de `registrado` a `cancelado` (no se crea otra fila).
 - ✅ Cliente vuelve a escribir días después → la IA recuerda la conversación previa (memoria Postgres).
 - ✅ Varios productos en un mensaje → la IA pide elegir uno (un pedido = un producto).
+- ✅ Cliente pide una foto → recibe una imagen del producto. Pide **otra/más** → recibe la siguiente no compartida. Cuando se acaban → el bot avisa que no hay más.
 - ✅ Mensajes fuera de contexto → la IA reencauza la conversación.
 
 ---
@@ -189,6 +193,7 @@ En el nodo **Enviar WhatsApp**:
 - **Sesiones e inventario en PostgreSQL:** la sesión se persiste con `INSERT ... ON CONFLICT (telefono) DO UPDATE` (UPSERT atómico). El catálogo se lee de la tabla `inventario` (caché), que el workflow *Sync Inventario* mantiene al día desde Google Sheets.
 - **Cancelación = UPDATE por `pedido_id`:** al registrar un pedido se genera un `pedido_id` único (string) que se guarda en `pedidos` y en `sesiones.ultimo_pedido_id`. El nodo *Cancelar Pedido* usa la operación `update` de Google Sheets matcheando por `pedido_id`, así cancela exactamente el pedido correcto aunque el cliente tenga varios.
 - **Identificador de cliente (`session`):** la tabla `sesiones` usa la columna `session` (TEXT) como clave. Hoy contiene el teléfono de WhatsApp; mañana puede contener el PSID alfanumérico de Facebook Messenger sin cambiar el esquema.
+- **Imágenes:** el bot detecta el pedido de fotos con el campo `enviar_imagen` de la IA y, en el nodo *Procesar Respuesta IA*, calcula la **siguiente imagen no enviada** del producto (lista de la columna `imagenes`). Lleva la cuenta en la sesión (`img_producto_id` + `img_index`); si cambias de producto, el contador se reinicia. El mensaje saliente se arma como tipo `image` (con caption) o `text` según corresponda, y se envía por el **mismo** nodo *Enviar WhatsApp*.
 - **Mensajes no-texto** (status, imágenes, audios) se ignoran en el nodo `Extraer Mensaje`.
 - **API de Meta:** se usa `graph.facebook.com/v21.0`. Actualiza la versión si Meta lo requiere.
 

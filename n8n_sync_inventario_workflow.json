@@ -73,9 +73,9 @@
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "INSERT INTO inventario (id, producto, valor, descripcion)\nVALUES ($1, $2, $3, $4)\nON CONFLICT (id) DO UPDATE SET\n  producto = EXCLUDED.producto,\n  valor = EXCLUDED.valor,\n  descripcion = EXCLUDED.descripcion;",
+        "query": "INSERT INTO inventario (id, producto, valor, descripcion, imagenes)\nVALUES ($1, $2, $3, $4, $5)\nON CONFLICT (id) DO UPDATE SET\n  producto = EXCLUDED.producto,\n  valor = EXCLUDED.valor,\n  descripcion = EXCLUDED.descripcion,\n  imagenes = EXCLUDED.imagenes;",
         "options": {
-          "queryReplacement": "={{ [$json.id, $json.producto, Number($json.valor) || 0, $json.descripcion || ''] }}"
+          "queryReplacement": "={{ [$json.id, $json.producto, Number($json.valor) || 0, $json.descripcion || '', $json.imagenes || ''] }}"
         }
       },
       "id": "node-upsert-inv",

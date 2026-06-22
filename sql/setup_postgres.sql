@@ -17,6 +17,8 @@ CREATE TABLE IF NOT EXISTS sesiones (
     nombre                TEXT        DEFAULT '',
     direccion             TEXT        DEFAULT '',
     ultimo_pedido_id      TEXT        DEFAULT '',   -- id del ultimo pedido registrado (para cancelaciones precisas)
+    img_producto_id       TEXT        DEFAULT '',   -- producto del que se estan enviando imagenes
+    img_index             INTEGER     DEFAULT 0,    -- proxima imagen a enviar de ese producto
     actualizado_en        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -26,11 +28,13 @@ CREATE INDEX IF NOT EXISTS idx_sesiones_actualizado ON sesiones (actualizado_en)
 -- El workflow "Sync Inventario" la mantiene sincronizada desde Google Sheets
 -- SOLO cuando el inventario cambia (o en la primera carga manual).
 -- El flujo principal lee el catalogo desde aqui (rapido), no desde Sheets en cada mensaje.
+-- 'imagenes' = una o varias URLs publicas de imagen separadas por "|" (o coma/salto de linea).
 CREATE TABLE IF NOT EXISTS inventario (
     id          TEXT PRIMARY KEY,   -- identificador unico del producto (alfanumerico, ej. "P001")
     producto    TEXT    NOT NULL,
     valor       NUMERIC DEFAULT 0,
-    descripcion TEXT    DEFAULT ''
+    descripcion TEXT    DEFAULT '',
+    imagenes    TEXT    DEFAULT ''
 );
 
 -- ============================================================
